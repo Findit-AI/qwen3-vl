@@ -437,16 +437,34 @@ impl Engine {
   /// Load the Qwen3-VL model at `opts.model_path()` with the given
   /// quantization. Blocks for ~13s on Apple Silicon Metal at first call.
   /// Holds GPU memory until the last clone is dropped.
+  ///
+  /// **Auto-detect of pre-quantized weights.** If
+  /// `<model_path>/config.json` declares a `quantization_config`
+  /// block (true for the official `Qwen3-VL-2B-Instruct-FP8`
+  /// release, AWQ / GPTQ checkpoints, and any other pre-quantized
+  /// variants), in-situ quantization is skipped automatically —
+  /// the configured [`EngineOptions::quantization`] would otherwise
+  /// re-quantize already-quantized weights. The unquantized
+  /// safetensors path (`Qwen/Qwen3-VL-2B-Instruct`) continues to
+  /// apply ISQ as before.
   #[instrument(name = "qwen3_vl::load", skip(opts), fields(model_path = %opts.model_path().display(), quantization = ?opts.quantization()))]
   pub async fn load(opts: EngineOptions) -> Result<Self, LoadError> {
     if !opts.model_path().exists() {
       return Err(LoadError::NotFound(opts.model_path().to_path_buf()));
     }
     let started = std::time::Instant::now();
-    info!("loading Qwen3-VL model");
+    let pre_quantized = is_pre_quantized(opts.model_path());
+    if pre_quantized {
+      info!("loading Qwen3-VL model (pre-quantized weights detected — skipping ISQ)");
+    } else {
+      info!("loading Qwen3-VL model");
+    }
     let model_id = opts.model_path().to_string_lossy().into_owned();
-    let model = MultimodalModelBuilder::new(model_id)
-      .with_isq(opts.quantization())
+    let mut builder = MultimodalModelBuilder::new(model_id);
+    if !pre_quantized {
+      builder = builder.with_isq(opts.quantization());
+    }
+    let model = builder
       .build()
       .await
       .map_err(|e| LoadError::Build(e.to_string()))?;
@@ -689,9 +707,96 @@ impl Engine {
   }
 }
 
+/// Returns true when `<model_path>/config.json` declares a
+/// top-level `quantization_config` block — the marker HuggingFace
+/// uses for pre-quantized weights (Qwen FP8, AWQ, GPTQ, BitsandBytes,
+/// etc.). Applying ISQ to weights that are already quantized would
+/// either no-op or re-quantize (lossy), so `Engine::load` skips
+/// `with_isq` in that case.
+///
+/// Failure modes are intentionally lenient: missing file, IO error,
+/// invalid JSON, missing field — all return `false`, which falls
+/// back to the unquantized-weights ISQ path. The model load itself
+/// will surface a clear error if the directory is genuinely
+/// unloadable; this helper only chooses between two valid load
+/// paths, so a false negative just means "let mistralrs apply the
+/// default ISQ on weights it'll then accept anyway".
+fn is_pre_quantized(model_path: &Path) -> bool {
+  let cfg = match std::fs::read_to_string(model_path.join("config.json")) {
+    Ok(s) => s,
+    Err(_) => return false,
+  };
+  match serde_json::from_str::<serde_json::Value>(&cfg) {
+    Ok(v) => v.get("quantization_config").is_some(),
+    Err(_) => false,
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// Build a throwaway model-dir-style tmpdir under
+  /// `target/tmp/<unique>/` (relative to cargo, cleaned up by
+  /// `cargo clean`). Returns the path so tests can drop a
+  /// `config.json` into it. Unique per process+counter so parallel
+  /// tests don't collide.
+  fn model_tmpdir(name: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+      "qwen3vl-test-{}-{}-{}",
+      std::process::id(),
+      N.fetch_add(1, Ordering::Relaxed),
+      name
+    ));
+    std::fs::create_dir_all(&dir).expect("mk tmpdir");
+    dir
+  }
+
+  #[test]
+  fn is_pre_quantized_returns_false_for_missing_config() {
+    let dir = model_tmpdir("missing-config");
+    assert!(!is_pre_quantized(&dir));
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn is_pre_quantized_returns_false_for_invalid_json() {
+    let dir = model_tmpdir("invalid-json");
+    std::fs::write(dir.join("config.json"), b"not-json{").unwrap();
+    assert!(!is_pre_quantized(&dir));
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn is_pre_quantized_returns_false_for_unquantized_safetensors_config() {
+    // Mirrors the structure of `Qwen/Qwen3-VL-2B-Instruct/config.json`
+    // — no `quantization_config` block. ISQ should still apply.
+    let dir = model_tmpdir("unquantized");
+    std::fs::write(
+      dir.join("config.json"),
+      br#"{"model_type":"qwen3_vl","architectures":["Qwen3VLForConditionalGeneration"]}"#,
+    )
+    .unwrap();
+    assert!(!is_pre_quantized(&dir));
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn is_pre_quantized_returns_true_for_fp8_config() {
+    // Mirrors the structure of `Qwen/Qwen3-VL-2B-Instruct-FP8/config.json`
+    // — top-level `quantization_config` block declaring fp8. ISQ
+    // should be skipped.
+    let dir = model_tmpdir("fp8");
+    std::fs::write(
+      dir.join("config.json"),
+      br#"{"model_type":"qwen3_vl","quantization_config":{"quant_method":"fp8","weight_block_size":[128,128]}}"#,
+    )
+    .unwrap();
+    assert!(is_pre_quantized(&dir));
+    let _ = std::fs::remove_dir_all(&dir);
+  }
 
   #[test]
   fn engine_options_defaults_to_deterministic_request() {
