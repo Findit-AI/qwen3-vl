@@ -1,344 +1,103 @@
-name: CI
+# Minimal CI for the qwen crate.
+#
+# Restored after Codex adversarial-review round 4 flagged that Task 1's
+# scaffold cleanup deleted the template-rs CI workflows and never
+# replaced them, leaving sampler / parser / Cargo.lock changes to merge
+# without an automated gate.
+#
+# The crate uses `mistralrs = "0.8"` with the `metal` feature, which
+# is macOS-only. Running on Linux would require feature-gating per OS;
+# until that's needed (the indexer is macOS-only today), CI is
+# macOS-only too. The committed `Cargo.lock` makes builds reproducible
+# on top of the unpinned manifest; cf. CONTRIBUTING.md for the
+# mistralrs upgrade workflow.
+#
+# Gates (fast, no GPU required):
+#   - `cargo fmt --check`              — style drift
+#   - `cargo clippy --lib -- -D warnings` — lint regression
+#   - `cargo test --lib`               — parser + accessor tests
+#   - `cargo check --all-targets`      — ensures examples/ and the
+#     non-integration tests compile against the public API.
+#   - `cargo check --all-targets --features integration` — Codex
+#     round 12 M2: without `--features integration`, the
+#     `tests/integration_scene.rs` file (which has a crate-level
+#     `#![cfg(feature = "integration")]`) compiles to nothing, so
+#     accessor renames or signature drift in the integration test
+#     could rot silently until a manual `QWEN_MODEL_PATH` run.
+#     This step compiles it but does not execute it.
+#
+# What's intentionally NOT in CI:
+#   - Running `tests/integration_scene.rs` against the real model
+#     (requires the ~4 GiB qwen3-vl-2b model and `QWEN_MODEL_PATH`,
+#     which GitHub-hosted runners don't have). Run locally before
+#     merging changes that touch the engine or scene preset. CI
+#     only typechecks the integration test, not its model run.
+#   - Running the `examples/smoke.rs` binary. Same reason — CI
+#     compiles it but does not execute it.
+#
+# Caching: cargo registry + target are cached by repo path + Cargo.lock
+# hash. Cold runs compile mistralrs and friends (~10–15 min); warm runs
+# are typically under 2 min.
+
+name: ci
 
 on:
   push:
-    branches:
-      - main
-    paths-ignore:
-      - 'README'
-      - 'COPYRIGHT'
-      - 'LICENSE-*'
-      - '**.md'
-      - '**.txt'
+    branches: [main]
   pull_request:
-    paths-ignore:
-      - 'README'
-      - 'COPYRIGHT'
-      - 'LICENSE-*'
-      - '**.md'
-      - '**.txt'
-  workflow_dispatch:
-  schedule: [cron: "0 1 */7 * *"]
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -Dwarnings
   RUST_BACKTRACE: 1
 
 jobs:
-  # Check formatting (platform-independent, one OS is enough)
-  rustfmt:
-    name: rustfmt
-    runs-on: ubuntu-latest
+  check:
+    name: fmt + clippy + lib tests
+    runs-on: macos-latest
+    timeout-minutes: 30
     steps:
-    - uses: actions/checkout@v6
-    - name: Install Rust
-      run: rustup update stable && rustup default stable && rustup component add rustfmt
-    - name: Check formatting
-      run: cargo fmt --all -- --check
+      - uses: actions/checkout@v4
 
-  # Apply clippy lints
-  clippy:
-    name: clippy
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-    - uses: actions/checkout@v6
-    - name: Install Rust
-      # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
-      run: rustup update stable --no-self-update && rustup default stable && rustup component add clippy
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
-    - name: Apply clippy lints
-      run: cargo hack clippy --each-feature --exclude-no-default-features
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
-  # Run tests on some extra platforms
-  cross:
-    name: cross
-    strategy:
-      matrix:
-        target:
-          - aarch64-unknown-linux-gnu
-          - aarch64-linux-android
-          - aarch64-unknown-linux-musl
-          - i686-linux-android
-          - x86_64-linux-android
-          - i686-pc-windows-gnu
-          - x86_64-pc-windows-gnu
-          - i686-unknown-linux-gnu
-          - powerpc64-unknown-linux-gnu
-          - riscv64gc-unknown-linux-gnu
-          - wasm32-unknown-unknown
-          - wasm32-unknown-emscripten
-          - wasm32-wasip1
-          - wasm32-wasip1-threads
-          - wasm32-wasip2
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Cache cargo build and registry
-        uses: actions/cache@v5
+      - name: Cargo cache
+        uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-cross-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cross-
-      - name: Install Rust
-        run: rustup update stable && rustup default stable
-      - name: cargo build --target ${{ matrix.target }}
-        run: |
-          rustup target add ${{ matrix.target }}
-          cargo build --target ${{ matrix.target }}
+            ${{ runner.os }}-cargo-
 
-  build:
-    name: build
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-    - uses: actions/checkout@v6
-    - name: Cache cargo build and registry
-      uses: actions/cache@v5
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-build-
-    - name: Install Rust
-      # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
-      run: rustup update stable --no-self-update && rustup default stable
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
-    - name: Run build
-      run: cargo hack build --feature-powerset --exclude-no-default-features
+      - name: rustfmt
+        run: cargo fmt --check
 
-  test:
-    name: test
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-    - uses: actions/checkout@v6
-    - name: Cache cargo build and registry
-      uses: actions/cache@v5
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-test-
-    - name: Install Rust
-      # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
-      run: rustup update stable --no-self-update && rustup default stable
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
-    - name: Run test
-      run: cargo hack test --feature-powerset --exclude-no-default-features --exclude-features loom
+      - name: clippy (lib + tests + examples)
+        run: cargo clippy --lib --tests --examples --locked -- -D warnings
 
-  sanitizer:
-    name: sanitizer
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Cache cargo build and registry
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-sanitizer-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-sanitizer-
-      - name: Install Rust
-        run: rustup update nightly && rustup default nightly
-      - name: Install rust-src
-        run: rustup component add rust-src
-      - name: ASAN / LSAN / MSAN / TSAN
-        run: bash ci/sanitizer.sh
+      - name: lib tests
+        run: cargo test --lib --locked
 
-  miri-tb:
-    name: miri-tb-${{ matrix.target }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: i686-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: powerpc64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: s390x-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: riscv64gc-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-      - name: Cache cargo build and registry
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-miri-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-miri-
-      - name: Miri
-        run: |
-          bash ci/miri_tb.sh "${{ matrix.target }}"
+      - name: typecheck all targets (examples + tests, no execution)
+        run: cargo check --all-targets --locked
 
-  miri-sb:
-    name: miri-sb-${{ matrix.target }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: i686-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: powerpc64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: s390x-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: riscv64gc-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-      - name: Cache cargo build and registry
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-miri-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-miri-
-      - name: Miri
-        run: |
-          bash ci/miri_sb.sh "${{ matrix.target }}"
-
-  loom:
-    name: loom
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-      - name: Cache cargo build and registry
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-loom-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-loom-
-      - name: Install Rust
-        run: rustup update nightly --no-self-update && rustup default nightly
-      - name: Loom tests
-        run: cargo test --tests --features loom
-
-  # valgrind:
-  #   name: valgrind
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v6
-  #     - name: Cache cargo build and registry
-  #       uses: actions/cache@v5
-  #       with:
-  #         path: |
-  #           ~/.cargo/registry
-  #           ~/.cargo/git
-  #           target
-  #         key: ubuntu-latest-valgrind-${{ hashFiles('**/Cargo.lock') }}
-  #         restore-keys: |
-  #           ubuntu-latest-valgrind-
-  #     - name: Install Rust
-  #       run: rustup update stable && rustup default stable
-  #     - name: Install Valgrind
-  #       run: |
-  #         sudo apt-get update -y
-  #         sudo apt-get install -y valgrind
-  #     # Uncomment and customize when you have binaries to test:
-  #     # - name: cargo build foo
-  #     #   run: cargo build --bin foo
-  #     #   working-directory: integration
-  #     # - name: Run valgrind foo
-  #     #   run: valgrind --error-exitcode=1 --leak-check=full --show-leak-kinds=all ./target/debug/foo
-  #     #   working-directory: integration
-
-  coverage:
-    name: coverage
-    runs-on: ubuntu-latest
-    needs:
-      - rustfmt
-      - clippy
-      - build
-      - cross
-      - test
-      - sanitizer
-      - loom
-    steps:
-      - uses: actions/checkout@v6
-      - name: Install Rust
-        run: rustup update nightly && rustup default nightly
-      - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
-      - name: Cache cargo build and registry
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-coverage-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-coverage-
-      - name: Run tarpaulin
-        env:
-          RUSTFLAGS: "--cfg tarpaulin"
-        run: cargo tarpaulin --all-features --run-types tests --run-types doctests --workspace --out xml
-      - name: Upload to codecov.io
-        uses: codecov/codecov-action@v6
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          slug: ${{ github.repository }}
-          fail_ci_if_error: true
+      - name: typecheck integration test (compile only, no model run)
+        # Codex round 12 M2: tests/integration_scene.rs has
+        # `#![cfg(feature = "integration")]`, so the previous
+        # --all-targets step (no features) was compiling it to
+        # nothing. This step compiles the integration test's actual
+        # body so accessor renames / signature drift get caught in
+        # CI, while leaving the real-model run gated on
+        # `QWEN_MODEL_PATH` (not available on GitHub runners).
+        run: cargo check --all-targets --features integration --locked
