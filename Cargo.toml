@@ -67,6 +67,16 @@ tokio      = { version = "1", default-features = false, features = ["time"] }
 tokio              = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Apple-only: the integration test (`tests/integration_scene.rs`,
+# behind `--features integration`) needs an actual GPU backend
+# selected on `mistralrs` to fit the 3-4 GB model in RAM. Cargo
+# unifies feature requests, so adding `metal` here for tests on
+# macOS is enough — the lib build keeps `mistralrs` CPU-only as
+# the default. Non-Apple targets are untouched; Linux/CUDA users
+# select their own backend at the consumer level (see README).
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+mistralrs = { version = "0.8", default-features = false, features = ["metal"] }
+
 [lints]
 workspace = true
 
