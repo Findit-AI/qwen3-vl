@@ -438,15 +438,27 @@ impl Engine {
   /// quantization. Blocks for ~13s on Apple Silicon Metal at first call.
   /// Holds GPU memory until the last clone is dropped.
   ///
+  /// **Recommended model:** `Qwen/Qwen3-VL-2B-Instruct` (BF16
+  /// safetensors) — the engine then applies in-situ quantization
+  /// at load time per `EngineOptions::quantization` (default
+  /// `IsqType::Q4K`), which gives Q4_K-class RAM compression
+  /// without re-encoding the weights on disk.
+  ///
   /// **Auto-detect of pre-quantized weights.** If
   /// `<model_path>/config.json` declares a `quantization_config`
-  /// block (true for the official `Qwen3-VL-2B-Instruct-FP8`
-  /// release, AWQ / GPTQ checkpoints, and any other pre-quantized
-  /// variants), in-situ quantization is skipped automatically —
-  /// the configured [`EngineOptions::quantization`] would otherwise
-  /// re-quantize already-quantized weights. The unquantized
-  /// safetensors path (`Qwen/Qwen3-VL-2B-Instruct`) continues to
-  /// apply ISQ as before.
+  /// block (true for `Qwen/Qwen3-VL-2B-Instruct-FP8`, AWQ / GPTQ
+  /// checkpoints, and any other pre-quantized variants),
+  /// in-situ quantization is skipped automatically — the
+  /// configured [`EngineOptions::quantization`] would otherwise
+  /// re-quantize already-quantized weights.
+  ///
+  /// > **Apple Silicon caveat (mistralrs 0.8.x):** the
+  /// > `Qwen3-VL-2B-Instruct-FP8` checkpoint loads cleanly but
+  /// > inference fails on the first prompt step inside mistralrs's
+  /// > Metal `BlockwiseFP8` dequant kernel (`Command buffer …
+  /// > Ignored (kIOGPUCommandBufferCallbackErrorSubmissionsIgnored)`).
+  /// > This is upstream and out of scope here. Use the BF16
+  /// > checkpoint on Apple Silicon; CUDA hosts should be unaffected.
   #[instrument(name = "qwen3_vl::load", skip(opts), fields(model_path = %opts.model_path().display(), quantization = ?opts.quantization()))]
   pub async fn load(opts: EngineOptions) -> Result<Self, LoadError> {
     if !opts.model_path().exists() {
