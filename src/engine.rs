@@ -753,7 +753,8 @@ mod tests {
   fn request_options_defaults_match_model_card() {
     // Hard-coded against the Qwen3-VL Instruct model card values to
     // catch silent drift if the defaults are ever edited without a
-    // CHANGELOG note. See indexer/models/qwen3-vl-2b/README.md.
+    // CHANGELOG note. See models/qwen3-vl-2b/README.md (or the
+    // upstream HuggingFace model card if no local checkout exists).
     let opts = RequestOptions::new();
     assert_eq!(opts.temperature(), 0.7);
     assert_eq!(opts.top_p(), 0.8);

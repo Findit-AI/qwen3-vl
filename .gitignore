@@ -16,5 +16,10 @@
 **.claude/
 docs/
 
+# Local model checkouts (Qwen3-VL-2B is ~4 GB; keep out of git +
+# out of the published .crate). Set QWEN_MODEL_PATH at runtime
+# instead.
+models/
+
 Cargo.lock
 
