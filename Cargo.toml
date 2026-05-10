@@ -1,45 +1,76 @@
 [package]
-name = "template-rs"
-version = "0.0.0"
-edition = "2021"
-repository = "https://github.com/al8n/template-rs"
-homepage = "https://github.com/al8n/template-rs"
-documentation = "https://docs.rs/template-rs"
-description = "A template for creating Rust open-source repo on GitHub"
-license = "MIT OR Apache-2.0"
-rust-version = "1.73"
+name          = "qwen3-vl"
+version       = "0.1.1"
+edition       = "2024"
+rust-version  = "1.95.0"
+description   = "Qwen3-VL vision-language structured-output engine over mistralrs, implementing the engine-agnostic llmtask::Task contract"
+license       = "MIT OR Apache-2.0"
+repository    = "https://github.com/findit-ai/qwen3-vl"
+homepage      = "https://github.com/findit-ai/qwen3-vl"
+documentation = "https://docs.rs/qwen3-vl"
+keywords      = ["vlm", "qwen", "vision-language", "structured-output", "mistralrs"]
+categories    = ["api-bindings", "computer-vision", "text-processing"]
 
-[[bench]]
-path = "benches/foo.rs"
-name = "foo"
-harness = false
+[lib]
+# Keep the import path short: `use qwen3_vl::Engine;` (auto-derived
+# from the package name with hyphens converted to underscores).
+# Stated explicitly so the library identity stays decoupled from
+# any future repo rename.
+name = "qwen3_vl"
 
 [features]
-default = ["std"]
-alloc = []
-std = []
+# Default is CPU-only so qwen3-vl builds out of the box on every
+# host mistralrs supports.
+#
+# qwen3-vl does NOT re-export mistralrs's hardware-backend features
+# (`metal`, `cuda`, `cudnn`, `flash-attn`, `accelerate`, `mkl`,
+# `nccl`, `ring`). Enabling them through a pass-through feature
+# would lock callers into our choice of names, hide the build-time
+# toolchain prerequisites (Xcode CLT for `metal`/`accelerate`,
+# CUDA toolkit for `cuda`, etc.), and silently surprise anyone who
+# expected a feature like `metal` to "just work" on a Mac without
+# Xcode CLT installed.
+#
+# To pick a backend, depend on mistralrs directly in your own
+# Cargo.toml — Cargo unifies feature sets across all references
+# to the same crate, so qwen3-vl will pick up your selection:
+#
+#     [dependencies]
+#     qwen3-vl  = "0.1"
+#     mistralrs = { version = "0.8", features = ["metal"] }  # or "cuda", etc.
+#
+default = []
+
+# Enables tests/integration_scene.rs (requires QWEN_MODEL_PATH env var).
+integration = []
+# Enables raw-output tracing at trace level (off by default — heavyweight).
+trace-output = []
 
 [dependencies]
+# `default-features = false` is purely defensive — mistralrs 0.8
+# has no default features today, but pinning the surface keeps a
+# future default-on backend from leaking into our CPU build.
+mistralrs  = { version = "0.8", default-features = false }
+image      = { version = "0.25", default-features = false, features = ["jpeg"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+smol_str   = "0.3"
+thiserror  = "2"
+tracing    = "0.1"
+llmtask    = { version = "0.1", features = ["json"] }
+# Issue #1 H-001: tokio::time::timeout wraps mistralrs inference.
+# Only the `time` feature is needed in the lib; the test runtime
+# pulls macros + rt-multi-thread via dev-dependencies below.
+tokio      = { version = "1", default-features = false, features = ["time"] }
 
 [dev-dependencies]
-criterion = "0.8"
-tempfile = "3"
+tokio              = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-[profile.bench]
-opt-level = 3
-debug = false
-codegen-units = 1
-lto = 'thin'
-incremental = false
-debug-assertions = false
-overflow-checks = false
-rpath = false
+[lints]
+workspace = true
 
-[package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
-
-[lints.rust]
+[workspace.lints.rust]
 rust_2018_idioms = "warn"
 single_use_lifetimes = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = [
